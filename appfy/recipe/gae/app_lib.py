@@ -63,8 +63,10 @@ import datetime
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import uuid
+import zipfile
 
 from zc.recipe import egg
 
@@ -181,7 +183,7 @@ class Recipe(egg.Scripts):
         """Returns the list of package paths to be copied."""
         pkgs = []
         for path in ws.entries:
-            lib_paths = self.get_lib_paths(path)
+            path, lib_paths = self.get_lib_paths(path)
             if not lib_paths:
                 self.logger.info(
                     'Library not installed: missing egg info for %r.',
@@ -211,12 +213,15 @@ class Recipe(egg.Scripts):
         egg_path = os.path.join(path, 'EGG-INFO')
         if os.path.isdir(egg_path):
             # Unzipped egg metadata.
-            return self.get_top_level_libs(egg_path)
+            return path, self.get_top_level_libs(egg_path)
 
-        if os.path.isfile(path):
-            # Zipped egg? Should we try to unpack it?
-            # unpack_archive(path, self.eggs_dir)
-            return None
+        elif os.path.isfile(path):
+            # Zipped egg?
+            unzipped_path = self._unzip(path)
+            if not unzipped_path:
+                return
+            egg_path = os.path.join(unzipped_path, 'EGG-INFO')
+            return unzipped_path, self.get_top_level_libs(egg_path)
 
         # Last try: develop eggs.
         elif os.path.isdir(path):
@@ -224,7 +229,29 @@ class Recipe(egg.Scripts):
             for filename in files:
                 if filename.endswith('.egg-info'):
                     egg_path = os.path.join(path, filename)
-                    return self.get_top_level_libs(egg_path)
+                    return path, self.get_top_level_libs(egg_path)
+
+    def _unzip(self, zip_path):
+        if sys.version_info < (2, 7, 4):
+            # zipfile in Python < 2.7.4 has path traversal vulnerability
+            # https://docs.python.org/2/library/zipfile.html#zipfile.ZipFile.extract
+            self.logger.info(
+                'Did not extract %r - you need Python>=2.7.4 for that.',
+                zip_path,
+            )
+            return
+        dest_dir = '%s.unzipped' % zip_path
+        # Clean up!
+        if os.path.exists(dest_dir):
+            if os.path.isdir(dest_dir):
+                shutil.rmtree(dest_dir)
+            elif os.path.isfile(dest_dir):  # just in case
+                os.remove(dest_dir)
+        # Make anew
+        os.mkdir(dest_dir)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(dest_dir)
+        return dest_dir
 
     def delete_libs(self):
         """Removes old libraries
